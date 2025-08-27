@@ -1,0 +1,11 @@
+fastapi>=0.111          # 변수: FastAPI 서버
+uvicorn[standard]>=0.30 # 변수: ASGI 서버 런처(uvloop 등 포함)
+pydantic>=2.7           # 변수: 모델/설정 검증 (v2 고정 권장)
+pydantic-settings>=2.2  # 변수: .env 주입 (Settings)
+python-dotenv>=1.0      # 변수: .env 파서 (환경 따라 누락 대비)
+httpx>=0.27             # 변수: 비동기 HTTP 클라이언트
+xmltodict>=0.13         # 변수: XML → dict 파서
+chromadb>=0.5.4         # 변수: 로컬 벡터DB (선택)
+numpy>=1.26             # 변수: 점수 계산 등
+
+python-multipart
