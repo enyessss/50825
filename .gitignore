@@ -1,0 +1,44 @@
+# 가상환경
+.venv/
+venv/
+
+# 캐시/빌드
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
+
+# 환경설정
+.env
+
+# 데이터/인덱스
+.chroma*/
+data/
+data1/
+*.sqlite3
+
+# 백업 파일
+*.bak
+*.backup.*
+# 가상환경 & 캐시
+.venv/
+__pycache__/
+
+# IDE 설정
+.idea/
+
+# 데이터
+data/
+data1/
+
+# 환경변수 파일
+.env
+
+# 기타
+.chroma_elevators/
