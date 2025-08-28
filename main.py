@@ -125,6 +125,157 @@ def _infer_station_from_question(q: str) -> Optional[str]:
             return name
     return None
 
+# --- [main.py] 테이블 포맷 유틸 (NEW) --------------------------------------
+
+# 변수(고정): 표 컬럼 정의
+RESTROOM_COLUMNS: list[str] = ["호선", "층", "내/외부", "출구", "위치", "운영시간", "전화"]  # 변수(고정)
+ELEVATOR_COLUMNS: list[str] = ["호선", "층", "연결", "방면/상세", "상태"]                  # 변수(고정)
+
+def _md_table(headers: list[str], rows: list[list[str]]) -> str:
+    head = "| " + " | ".join(headers) + " |"
+    sep  = "| " + " | ".join(["---"] * len(headers)) + " |"
+    body = "\n".join("| " + " | ".join(r) + " |" for r in rows) if rows else "| - |"
+    return "\n".join([head, sep, body])
+
+def _restroom_rows(items: list[dict]) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for it in items:
+        line  = it.get("line_name") or (it.get("line_no") and f"{it['line_no']}호선") or ""
+        floor = ((it.get("ground") or "") + (it.get("floor") or "")).strip() or (it.get("floor") or "")
+        gate  = (it.get("gate") or "").replace(" ", "")
+        exitc = str(it.get("exit_no") or it.get("exit_code") or "")
+        loc   = it.get("detail") or ""
+        hrs   = it.get("open_hours") or ""
+        phone = it.get("phone") or ""
+        rows.append([line, floor, gate, exitc, loc, hrs, phone])
+    return rows
+
+def _elevator_rows(items: list[dict]) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for it in items:
+        line  = it.get("line_name") or (it.get("line_no") and f"{it['line_no']}호선") or ""
+        floor = ""
+        lp = it.get("levels_path") or []
+        if len(lp) >= 1:
+            # (표시는 B2↔B1은 'B2↔B1', 층 칸엔 최상단만 간단히)
+            floor = (lp[0] if isinstance(lp[0], str) else str(lp[0]))
+        connect = ""
+        if len(lp) >= 2:
+            a = lp[0] if isinstance(lp[0], str) else str(lp[0])
+            b = lp[-1] if isinstance(lp[-1], str) else str(lp[-1])
+            connect = f"{a}↔{b}"
+        detail = it.get("instl_pstn") or it.get("detail") or it.get("direction_hint") or ""
+        status = it.get("use_status_raw") or it.get("status") or ""
+        rows.append([line, floor, connect, detail, status])
+    return rows
+
+def format_facilities_as_tables(restrooms: list[dict], elevators: list[dict]) -> str:
+    parts: list[str] = []
+    if restrooms:
+        parts.append("### 🚻 장애인 화장실\n" + _md_table(RESTROOM_COLUMNS, _restroom_rows(restrooms)))
+    if elevators:
+        parts.append("### 🛗 엘리베이터\n" + _md_table(ELEVATOR_COLUMNS, _elevator_rows(elevators)))
+    return "\n\n".join(parts) if parts else "표로 표시할 설비를 찾지 못했어요."
+# --------------------------------------------------------------------------
+# --- [main.py] 요약(LLM/폴백) 유틸 (NEW) ------------------------------------
+
+# 변수(고정): 요약 최대 줄 수 / 최대 항목
+SUMMARY_MAX_LINES: int = 3       # 변수(고정)
+SUMMARY_SAMPLE_LIMIT: int = 6    # 변수(고정)
+
+def _short_line_for_restroom(m: dict) -> str:
+    ln  = m.get("line_name") or (m.get("line_no") and f"{m['line_no']}호선") or ""
+    fl  = ((m.get("ground") or "") + (m.get("floor") or "")).strip() or (m.get("floor") or "")
+    gate= (m.get("gate") or "").replace(" ", "")
+    ex  = m.get("exit_no") or m.get("exit_code") or ""
+    det = m.get("detail") or ""
+    return " · ".join([x for x in [ln, fl, gate, (f"{ex}번 출구" if ex else ""), det] if x])
+
+def _short_line_for_elev(m: dict) -> str:
+    ln  = m.get("line_name") or (m.get("line_no") and f"{m['line_no']}호선") or ""
+    lp  = m.get("levels_path") or []
+    seg = (f"{lp[0]}↔{lp[-1]}" if len(lp) >= 2 else (lp[0] if lp else "")) or ""
+    pos = m.get("instl_pstn") or m.get("detail") or m.get("direction_hint") or ""
+    sta = m.get("use_status_raw") or ""
+    return " · ".join([x for x in [ln, seg, pos, (f"상태 {sta}" if sta else "")] if x])
+
+def _summarize_rule(restrooms: list[dict], elevators: list[dict],
+                    station_hint: str = "", line_no: str | None = None) -> str:
+    head = (station_hint or "").strip()
+    if line_no:
+        head = (head + f" {line_no}호선").strip()
+
+    lines: list[str] = []
+    if restrooms:
+        # 출구번호, 층 분포 간단 요약
+        exits = [str(m.get("exit_no") or m.get("exit_code") or "") for m in restrooms if (m.get("exit_no") or m.get("exit_code"))]
+        exits = [e for e in exits if e]
+        floors = [((m.get("ground") or "") + (m.get("floor") or "")).strip() or (m.get("floor") or "") for m in restrooms]
+        floors = [f for f in floors if f]
+        ex_preview = (", ".join(sorted(set(exits), key=lambda x: (len(x), x))[:5]) + (" 외" if len(set(exits))>5 else "")) if exits else "출구 표기 없음"
+        fl_preview = (", ".join(sorted(set(floors), key=lambda x: (x.startswith('B'), x))) ) if floors else "층 정보 없음"
+        lines.append(f"장애인 화장실 {len(restrooms)}개 · 출구 {ex_preview} · 층 {fl_preview}")
+
+    if elevators:
+        stats = [m.get("use_status_raw") or "" for m in elevators]
+        buck = _status_bucket(stats)
+        # 연결 경로 샘플
+        segs = []
+        for m in elevators[:SUMMARY_SAMPLE_LIMIT]:
+            lp = m.get("levels_path") or []
+            seg = (f"{lp[0]}↔{lp[-1]}" if len(lp) >= 2 else (lp[0] if lp else ""))
+            if seg: segs.append(seg)
+        segs = [*dict.fromkeys(segs)]  # dedup keep order
+        seg_preview = ", ".join(segs[:3]) if segs else "연결 정보 없음"
+        lines.append(f"엘리베이터 {len(elevators)}개 · 연결 {seg_preview} · 상태 요약(정상 {buck['정상']}, 중지/고장 {buck['중지/고장']}, 정보없음 {buck['정보없음']})")
+
+    if not lines:
+        return "요약할 데이터가 없습니다."
+    out = (head + " 요약: ").strip() if head else "요약: "
+    return out + " / ".join(lines[:SUMMARY_MAX_LINES])
+
+async def _summarize(restrooms: list[dict], elevators: list[dict],
+                     station_hint: str = "", line_no: str | None = None,
+                     mode: str = "rule") -> str:
+    """
+    mode: "rule"(기본, 결정론) | "llm"
+    - "llm"은 ALLOW_LLM_SUMMARY=True 인 경우에만 시도, 실패 시 rule로 폴백
+    """
+    # 항상 먼저 rule 생성
+    rule_text = _summarize_rule(restrooms, elevators, station_hint, line_no)
+
+    if mode != "llm" or not ALLOW_LLM_SUMMARY or not OPENAI_API_KEY:
+        return rule_text
+
+    # 여기부터는 명시적 허용 + 키 있을 때만 LLM 시도 (엄격 프롬프트 + 온도 0)
+    bullets = []
+    for m in restrooms[:SUMMARY_SAMPLE_LIMIT]:
+        bullets.append("- REST " + _short_line_for_restroom(m))
+    for m in elevators[:SUMMARY_SAMPLE_LIMIT]:
+        bullets.append("- ELEV " + _short_line_for_elev(m))
+
+    sys_p = (
+        "주어진 항목만 근거로 2~3문장 한국어 요약을 작성하라. "
+        "새 정보 추정/추가는 금지. 숫자/출구/층/연결/상태만 사용. "
+        "데이터에 없는 값 언급 금지. 간결한 명사형 문장 선호."
+    )
+    usr_p = (f"역: {(station_hint + (' ' + str(line_no) + '호선' if line_no else '')).strip() or '미지정'}\n"
+             "항목:\n" + "\n".join(bullets if bullets else ["(없음)"]))
+
+    try:
+        txt = await _openai_chat(
+            [{"role": "system", "content": sys_p}, {"role": "user", "content": usr_p}],
+            temperature=0.0
+        )
+        llm_text = (txt or "").strip()
+        # 가드: LLM 결과가 비었거나 금칙(데이터 외 단어 길게) 감지되면 rule로 대체
+        return llm_text if llm_text else rule_text
+    except Exception:
+        return rule_text
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+
+
 # =========================
 # 6) CSV: 장애인 화장실 로더(정리본) + 포맷터
 # =========================
@@ -378,7 +529,10 @@ def _parse_constraints_from_question(q: str) -> Tuple[List[str], Optional[int], 
 OPENAI_API_KEY: str = getattr(settings, "OPENAI_API_KEY", "")                         # 변수(고정)
 OPENAI_BASE_URL: str = getattr(settings, "OPENAI_BASE_URL", "https://api.openai.com/v1")  # 변수(고정)
 GENERATION_MODEL: str = getattr(settings, "GENERATION_MODEL", "gpt-3.5-turbo")            # 변수(고정)
-HTTP_TIMEOUT_SEC: int = getattr(settings, "HTTP_TIMEOUT_SEC", 8)                      # 변수(고정)
+HTTP_TIMEOUT_SEC: int = getattr(settings, "HTTP_TIMEOUT_SEC", 8)
+# 변수(고정): LLM 요약 허용 여부 (기본 False → 헛소리 방지)
+ALLOW_LLM_SUMMARY: bool = False
+# 변수(고정)
 
 async def _openai_chat(messages: List[Dict[str, str]], temperature: float = 0.2) -> str:
     if not OPENAI_API_KEY:
@@ -931,7 +1085,12 @@ async def ask_llm(body: Dict[str, Any] = Body(...)):
         if not question:
             raise HTTPException(status_code=400, detail="question 필수")
 
+        # 변수(요청옵션): 응답을 표로 받을지
+        response_format: str = (body.get("format") or body.get("response_format") or "").lower()  # "table" 기대
+        want_table: bool = (response_format == "table")
         intent = _detect_intent(question)
+        want_summary: bool = bool(body.get("summary") or body.get("with_summary"))
+        summary_mode: str = (body.get("summary_mode") or "rule").lower()
 
         # === [FAST PATH] 장애인 화장실: CSV만 ===
         if intent.get("want_restroom"):
@@ -955,6 +1114,20 @@ async def ask_llm(body: Dict[str, Any] = Body(...)):
             if not pool:
                 return {"answer": f"{_display_station(st_name)} 기준 장애인 화장실 정보를 찾지 못했어요.", "retrieved": [],
                         "fallback": False, "llm_error": None}
+
+            if want_table:
+                md = format_facilities_as_tables(pool, [])  # 화장실만 표
+                summary_txt = ""
+                if want_summary:
+                    summary_txt = await _summarize(pool, [], station_hint=st_name, line_no=line_no, mode=summary_mode)
+                return {
+                    "answer": (md + ("\n\n---\n" + summary_txt if summary_txt else "")),
+                    "answer_format": "markdown_table+summary" if summary_txt else "markdown_table",
+                    "retrieved": pool[:10],
+                    "fallback": False,
+                    "llm_error": None
+                }
+
 
             lines = [_format_restroom_line(r) for r in pool]
             if len(pool) == 1:
@@ -1174,9 +1347,30 @@ async def ask_llm(body: Dict[str, Any] = Body(...)):
                 pool = [m for m in pool if (m.get("line_no") or "") == line_no]
             els = [m for m in pool if m.get("equipment_type") == "엘리베이터"]
             els = _dedup_metas(els)
+
             if els:
+                if want_table:
+                    elev_rows_ready = []
+                    for m in els:
+                        elev_rows_ready.append({
+                            "line_name": m.get("line_name") or (m.get("line_no") and f"{m['line_no']}호선"),
+                            "levels_path": m.get("levels_path"),
+                            "instl_pstn": m.get("instl_pstn"),
+                            "use_status_raw": m.get("use_status_raw"),
+                        })
+                    md = "### 🛗 엘리베이터\n" + _md_table(ELEVATOR_COLUMNS, _elevator_rows(elev_rows_ready))
+                    return {
+                        "answer": md,
+                        "answer_format": "markdown_table",
+                        "retrieved": els,
+                        "fallback": False,
+                        "llm_error": None
+                    }
+
+                # (기존 문장형)
                 count = len(els)
-                head_txt = " ".join([s for s in [_display_station(st_name), (f"{line_no}호선" if line_no else "")] if s]).strip()
+                head_txt = " ".join(
+                    [s for s in [_display_station(st_name), (f"{line_no}호선" if line_no else "")] if s]).strip()
                 header = f"{head_txt} 엘리베이터는 총 {count}개입니다."
                 body = "\n".join(_format_item_line(x) for x in els)
                 return {"answer": header + "\n" + body, "retrieved": els, "fallback": False, "llm_error": None}
@@ -1210,6 +1404,29 @@ async def ask_llm(body: Dict[str, Any] = Body(...)):
             )
         except Exception:
             llm_answer = ""
+
+        if want_table:
+            rest = []  # 이번 분기서는 화장실 없음
+            elev = []
+            for m in metas[:6]:
+                elev.append({
+                    "line_name": m.get("line_name") or (m.get("line_no") and f"{m['line_no']}호선"),
+                    "levels_path": m.get("levels_path"),
+                    "instl_pstn": m.get("instl_pstn"),
+                    "use_status_raw": m.get("use_status_raw"),
+                })
+            md = format_facilities_as_tables(rest, elev)
+            summary_txt = ""
+            if want_summary:
+                summary_txt = await _summarize([], metas[:6], station_hint=st_name, line_no=line_no)
+            return {
+                "answer": (md + ("\n\n---\n" + summary_txt if summary_txt else "")),
+                "answer_format": "markdown_table+summary" if summary_txt else "markdown_table",
+                "retrieved": metas[:6],
+                "fallback": False,
+                "llm_error": None
+            }
+
 
         shaped = _format_item_line(metas[0])
         final_answer = (llm_answer or "").strip() or shaped
